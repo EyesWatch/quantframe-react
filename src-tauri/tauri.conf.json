@@ -56,11 +56,6 @@
         "scope": []
       }
     },
-    "updater": {
-      "active": true,
-      "endpoints": ["https://api.quantframe.app/release/{{target}}/{{arch}}/{{current_version}}"],
-      "dialog": false
-    },
     "bundle": {
       "active": true,
       "targets": "all",
