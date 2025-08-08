@@ -1,65 +1,115 @@
-name: App Builder
+name: Build (Tauri)
+
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+    branches: [ main ]
+  pull_request:
+  # Publie une Release et attache les bundles quand tu crées un tag vX.Y.Z
+  tags:
+    - "v*.*.*"
 
 jobs:
-  publish-tauri:
-    permissions:
-      contents: write
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: "macos-latest" # for Arm based macs (M1 and above).
-            args: "--target aarch64-apple-darwin"
-          - platform: "macos-latest" # for Intel based macs.
-            args: "--target x86_64-apple-darwin"
-          - platform: "ubuntu-22.04" # for Tauri v1 you could replace this with ubuntu-20.04.
-            args: ""
-          - platform: "windows-latest"
-            args: ""
+        os: [ubuntu-latest, windows-latest] # , macos-latest
 
-    runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
-      - name: setup node
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (Corepack)
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: "20"
+          cache: "pnpm"
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 9.12.1
+      - name: Enable pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          pnpm -v
 
-      - name: install Rust stable
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          components: clippy
 
-      - name: install dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04' # This must match the platform value defined above.
+      - name: OS deps (Linux only)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-        # webkitgtk 4.0 is for Tauri v1 - webkitgtk 4.1 is for Tauri v2.
-        # You can remove the one that doesn't apply to your app to speed up the workflow a bit.
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            curl \
+            jq
 
-      - name: install frontend dependencies
-        run: pnpm install # change this to npm, pnpm or bun depending on which one you use.
+      # macOS: uncomment si tu veux builder pour macOS
+      # - name: macOS env (optional)
+      #   if: matrix.os == 'macos-latest'
+      #   run: |
+      #     echo "No extra deps needed for unsigned build."
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile=false
+
+      # ⚠️ Si le README du projet te demande de supprimer un champ "pubkey" dans tauri.conf.json, fais-le manuellement dans ton repo
+      # ou décommente ce step 'jq' pour le retirer automatiquement s'il existe.
+      # - name: Remove pubkey (optional)
+      #   run: |
+      #     if command -v jq >/dev/null 2>&1; then
+      #       if [ -f src-tauri/tauri.conf.json ]; then
+      #         tmp=$(mktemp)
+      #         jq 'del(.tauri.bundle.pubkey) // .' src-tauri/tauri.conf.json > "$tmp" && mv "$tmp" src-tauri/tauri.conf.json
+      #       fi
+      #     fi
+
+      - name: Build (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Si tu signes, renseigne les secrets requis. Pour un build non signé, laisse vide.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # La tauri-action détecte pnpm automatiquement
+          args: ""
+          # Si tu veux forcer le script: pnpm tauri build
+          # tauriScript: pnpm tauri build
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantframe-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/release/*.exe
+            src-tauri/target/release/*.AppImage
+            src-tauri/target/release/*.msi
+            src-tauri/target/release/*.deb
+          if-no-files-found: warn
+
+  release:
+    name: Release (tagged)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          files: |
+            **/bundle/**/*
+            **/*.exe
+            **/*.AppImage
+            **/*.msi
+            **/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-        with:
-          tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: "Quantframe v__VERSION__"
-          releaseBody: "See the assets to download this version and install."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
